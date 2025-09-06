@@ -126,14 +126,52 @@ MyApplet.prototype = {
     // Auto-detect devices on startup if none configured
     this.autoDetectDevices();
 
+    // Populate settings UI combobox options dynamically based on current sinks
+    this.populateDeviceOptions();
+
     this.updateDisplay();
   },
 
+  // Build and apply combobox options for device1 and device2 from available sinks
+  populateDeviceOptions: function() {
+    try {
+      let sinks = getAvailableSinks();
+      let options = { "Unset": "" };
 
+      // Ensure unique and informative display labels
+      for (let [id, name] of Object.entries(sinks)) {
+        let label = name || id;
+        // Add a short suffix of the id to disambiguate duplicates
+        let shortId = id.length > 24 ? id.slice(-24) : id;
+        label = `${label} — ${shortId}`;
+        options[label] = id;
+      }
 
+      // Preserve current selections even if temporarily unavailable
+      if (this.device1 && !Object.values(options).includes(this.device1)) {
+        options[`(Unavailable) ${this.device1}`] = this.device1;
+      }
+      if (this.device2 && !Object.values(options).includes(this.device2)) {
+        options[`(Unavailable) ${this.device2}`] = this.device2;
+      }
 
+      if (typeof this.settings.setOptions === 'function') {
+        this.settings.setOptions("device1", options);
+        this.settings.setOptions("device2", options);
+      }
+    } catch (e) {
+      // best-effort; ignore errors if settings UI isn't open or setOptions unavailable
+    }
+  },
 
-
+  // Callback for the settings button defined in settings-schema.json
+  refreshDevices: function() {
+    this.populateDeviceOptions();
+    if (this.showNotifications) {
+      let sinks = getAvailableSinks();
+      Main.notify("Audio Toggle", `Found ${Object.keys(sinks).length} audio devices.`);
+    }
+  },
 
   autoDetectDevices: function() {
     // Only auto-detect if both devices are empty (startup behavior)
@@ -171,8 +209,6 @@ MyApplet.prototype = {
     }
   },
 
-
-
   // If the saved values are labels (from older versions), convert them to real sink IDs
   migrateSettingsValues: function() {
     try {
@@ -206,6 +242,8 @@ MyApplet.prototype = {
   on_settings_changed: function() {
     // Re-run migration in case user picked a label from an old schema or leftover config
     this.migrateSettingsValues();
+    // Keep combobox options up to date whenever settings change
+    this.populateDeviceOptions();
     this.updateDisplay();
   },
 

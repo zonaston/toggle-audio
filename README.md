@@ -4,6 +4,8 @@ A simple Cinnamon applet to toggle between two audio output devices (PulseAudio/
 
 Features
 - Toggle between any two configured audio sinks (moves existing audio streams to the new default sink)
+- Dynamic device lists: settings comboboxes are populated from your system's current sinks
+- One-click "Refresh device list" button in settings
 - Per-device icon selection (pick symbolic icon names or image files)
 - Works with PulseAudio or PipeWire (via pactl)
 
@@ -23,7 +25,7 @@ Enable
 - Right-click the applet > Configure, then choose your two devices
 
 Notes
-- The device dropdown shows known sinks at the time of editing settings. If you plug in new devices, just re-open settings to pick them.
+- The device dropdown is filled dynamically when settings are opened. If you plug in new devices, click the "Refresh device list" button in the applet settings.
 - If both selected devices resolve to the same sink, clicking toggles only the icon (visual toggle). This is intentional and configurable in the code.
 
 Contributing
