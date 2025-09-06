@@ -13,7 +13,9 @@ Install
 Option 1: Clone into your local Cinnamon applets directory
 
   cd ~/.local/share/cinnamon/applets/
+  
   git clone https://github.com/zonaston/toggle-audio.git toggle-audio@zonaston
+  
 
 Option 2: Download and extract
 - Download the archive
