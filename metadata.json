@@ -1,0 +1,7 @@
+{
+  "uuid": "toggle-audio@zonaston",
+  "name": "Zonaston Audio Toggle",
+  "description": "Toggle between any two audio output devices", 
+  "icon": "audio-card",
+  "version": 8
+}

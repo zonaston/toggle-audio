@@ -1,0 +1,9 @@
+.applet-box {
+    color: inherit; /* Uses panel text color */
+}
+
+.applet-icon {
+    icon-size: 16px;
+    color: inherit; /* Icons inherit panel color */
+}
+
