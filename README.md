@@ -19,7 +19,7 @@ Option 1: Clone into your local Cinnamon applets directory
 
 Option 2: Download and extract
 - Download the archive
-- Extract into: ~/.local/share/cinnamon/applets/toggle-audio@zonaston/ (folder name must match UUID in metadata.json)
+- Extract into: ~/.local/share/cinnamon/applets/toggle-audio@zonaston/
 
 Enable
 - Open System Settings > Applets
