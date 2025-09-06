@@ -1,6 +1,6 @@
-Zonaston Audio Toggle Applet
+Audio Toggle Applet
 
-A simple Cinnamon applet to toggle between two audio output devices (PulseAudio/pipewire-pulse), with a clean settings UI and optional visual-only toggle behavior when both devices are the same.
+A simple Cinnamon applet to toggle between two audio output devices (PulseAudio/pipewire-pulse) with a clean settings UI.
 
 Features
 - Toggle between any two configured audio sinks (moves existing audio streams to the new default sink)
