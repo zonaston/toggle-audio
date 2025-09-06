@@ -19,7 +19,7 @@ Option 2: Download and extract
 
 Enable
 - Open System Settings > Applets
-- Find "Zonaston Audio Toggle" and add it to the panel
+- Find "Audio Toggle" and add it to the panel
 - Right-click the applet > Configure, then choose your two devices
 
 Notes
