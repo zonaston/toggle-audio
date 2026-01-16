@@ -570,8 +570,7 @@ MyApplet.prototype = {
         `ID: ${dev1}\n\n` +
         `Click: Switch icon\n` +
         `Right-click: Device menu\n` +
-        `Middle-click: Settings\n` +
-        `Scroll: No effect (same device)`
+        `Middle-click: Settings`
       );
     } else if (current === dev1) {
       // Prefer user-selected icon, fallback to the previous default
@@ -586,7 +585,7 @@ MyApplet.prototype = {
         `Audio Toggle\n\n` +
         `Current: ${deviceName}\n` +
         `Switch to: ${otherDeviceName}\n\n` +
-        `Click/Scroll: Switch devices\n` +
+        `Click: Switch devices\n` +
         `Right-click: Device menu\n` +
         `Middle-click: Settings`
       );
@@ -602,7 +601,7 @@ MyApplet.prototype = {
         `Audio Toggle\n\n` +
         `Current: ${deviceName}\n` +
         `Switch to: ${otherDeviceName}\n\n` +
-        `Click/Scroll: Switch devices\n` +
+        `Click: Switch devices\n` +
         `Right-click: Device menu\n` +
         `Middle-click: Settings`
       );
@@ -737,34 +736,15 @@ MyApplet.prototype = {
   },
 
   on_applet_middle_clicked: function(event) {
-    // Open settings on middle-click
-    global.log("[Audio Toggle] Middle-click: opening settings");
+    // Open THIS applet's settings on middle-click
+    global.log("[Audio Toggle] Middle-click: opening applet settings");
     try {
-      // Open general applets settings page
-      GLib.spawn_command_line_async("cinnamon-settings applets");
+      // Open this specific applet's configuration using xlet-settings
+      GLib.spawn_command_line_async(`xlet-settings applet ${UUID} -i ${this.instance_id}`);
     } catch (e) {
       global.logError(`[Audio Toggle] Failed to open settings: ${e}`);
       Main.notify("Audio Toggle", "Could not open settings. Try right-click > Configure");
     }
-  },
-
-  on_applet_scroll: function(event) {
-    if (!this.device1 || !this.device2) {
-      return;
-    }
-
-    let dev1 = resolveSink(this.device1);
-    let dev2 = resolveSink(this.device2);
-
-    if (!dev1 || !dev2 || dev1 === dev2) {
-      return; // Don't scroll if devices not configured or same device
-    }
-
-    let current = getDefaultSink();
-    let target = (current === dev1) ? dev2 : dev1;
-
-    global.log(`[Audio Toggle] Scroll event: switching to ${target}`);
-    this.switchToDevice(target);
   },
 
   on_applet_right_clicked: function(event) {
