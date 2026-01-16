@@ -229,6 +229,9 @@ MyApplet.prototype = {
     this.menu = new Applet.AppletPopupMenu(this, orientation);
     this.menuManager.addMenu(this.menu);
 
+    // Ensure actor is reactive to scroll events
+    this.actor.reactive = true;
+
     // Setup keyboard shortcut
     this.setupKeybinding();
 
@@ -737,11 +740,11 @@ MyApplet.prototype = {
   },
 
   on_applet_middle_clicked: function(event) {
-    // Open settings on middle-click
-    global.log("[Audio Toggle] Middle-click: opening settings");
+    // Open THIS applet's settings on middle-click
+    global.log("[Audio Toggle] Middle-click: opening applet settings");
     try {
-      // Open general applets settings page
-      GLib.spawn_command_line_async("cinnamon-settings applets");
+      // Open this specific applet's configuration
+      GLib.spawn_command_line_async(`cinnamon-settings applets ${UUID} ${this.instance_id}`);
     } catch (e) {
       global.logError(`[Audio Toggle] Failed to open settings: ${e}`);
       Main.notify("Audio Toggle", "Could not open settings. Try right-click > Configure");
@@ -749,15 +752,19 @@ MyApplet.prototype = {
   },
 
   on_applet_scroll: function(event) {
+    global.log("[Audio Toggle] Scroll event detected");
+
     if (!this.device1 || !this.device2) {
-      return;
+      global.log("[Audio Toggle] Scroll ignored: devices not configured");
+      return true;
     }
 
     let dev1 = resolveSink(this.device1);
     let dev2 = resolveSink(this.device2);
 
     if (!dev1 || !dev2 || dev1 === dev2) {
-      return; // Don't scroll if devices not configured or same device
+      global.log("[Audio Toggle] Scroll ignored: devices not resolved or same device");
+      return true; // Don't scroll if devices not configured or same device
     }
 
     let current = getDefaultSink();
@@ -765,6 +772,7 @@ MyApplet.prototype = {
 
     global.log(`[Audio Toggle] Scroll event: switching to ${target}`);
     this.switchToDevice(target);
+    return true;
   },
 
   on_applet_right_clicked: function(event) {
