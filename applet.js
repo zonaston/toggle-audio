@@ -4,8 +4,13 @@ const GLib = imports.gi.GLib;
 const ByteArray = imports.byteArray;
 const Settings = imports.ui.settings;
 const Gio = imports.gi.Gio;
+const PopupMenu = imports.ui.popupMenu;
+const Clutter = imports.gi.Clutter;
+const Tweener = imports.ui.tweener;
+const Keybinding = imports.ui.keybindings;
 
 const PACTL = "/usr/bin/pactl";
+const UUID = "toggle-audio@zonaston";
 
 // Check if pactl exists at startup
 function checkPactlExists() {
@@ -158,6 +163,24 @@ function resolveSink(value) {
   return match || null;
 }
 
+// Get current volume for a sink (returns percentage 0-100)
+function getSinkVolume(sink) {
+  let r = runSync(`${PACTL} get-sink-volume ${sink}`);
+  if (r.ok) {
+    // Parse output like "Volume: front-left: 65536 / 100% / 0.00 dB, ..."
+    let match = r.out.match(/(\d+)%/);
+    if (match) {
+      return parseInt(match[1]);
+    }
+  }
+  return null;
+}
+
+// Set volume for a sink (percentage 0-100)
+function setSinkVolume(sink, volume) {
+  runSync(`${PACTL} set-sink-volume ${sink} ${volume}%`);
+}
+
 function MyApplet(orientation, panel_height, instance_id) {
   this._init(orientation, panel_height, instance_id);
 }
@@ -180,19 +203,34 @@ MyApplet.prototype = {
     }
 
     // Initialize settings
-    this.settings = new Settings.AppletSettings(this, "toggle-audio@zonaston", instance_id);
+    this.settings = new Settings.AppletSettings(this, UUID, instance_id);
     // Use BIDIRECTIONAL so changes we make programmatically reflect in the UI immediately
     this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device1", "device1", this.on_settings_changed, null);
     this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device2", "device2", this.on_settings_changed, null);
     this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "show-notifications", "showNotifications", this.on_settings_changed, null);
     this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device1-icon", "device1Icon", this.on_settings_changed, null);
     this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device2-icon", "device2Icon", this.on_settings_changed, null);
+    this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device1-nickname", "device1Nickname", this.on_settings_changed, null);
+    this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "device2-nickname", "device2Nickname", this.on_settings_changed, null);
+    this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "remember-volume", "rememberVolume", this.on_settings_changed, null);
+    this.settings.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, "toggle-keybinding", "toggleKeybinding", this.on_keybinding_changed, null);
 
     // Visual toggle state used when both devices are the same (icon-only toggle)
     this._visualToggleState = false;
 
     // Track if this is first run (no devices configured)
     this._isFirstRun = (!this.device1 && !this.device2);
+
+    // Volume memory storage (device ID -> volume percentage)
+    this._volumeMemory = {};
+
+    // Setup right-click context menu
+    this.menuManager = new PopupMenu.PopupMenuManager(this);
+    this.menu = new Applet.AppletPopupMenu(this, orientation);
+    this.menuManager.addMenu(this.menu);
+
+    // Setup keyboard shortcut
+    this.setupKeybinding();
 
     // Attempt to migrate any legacy values (e.g. human labels instead of sink IDs)
     this.migrateSettingsValues();
@@ -202,6 +240,9 @@ MyApplet.prototype = {
 
     // Populate settings UI combobox options dynamically based on current sinks
     this.populateDeviceOptions();
+
+    // Build initial popup menu
+    this.buildMenu();
 
     this.updateDisplay();
 
@@ -223,6 +264,126 @@ MyApplet.prototype = {
       "4. Click to switch between them!\n\n" +
       "Tip: Middle-click opens settings"
     );
+  },
+
+  // Setup keyboard shortcut binding
+  setupKeybinding: function() {
+    if (this.toggleKeybinding && this.toggleKeybinding !== "") {
+      try {
+        Main.keybindingManager.addHotKey(
+          UUID + "-toggle",
+          this.toggleKeybinding,
+          () => { this.toggleDevices(); }
+        );
+        global.log(`[Audio Toggle] Keyboard shortcut bound: ${this.toggleKeybinding}`);
+      } catch (e) {
+        global.logError(`[Audio Toggle] Failed to bind keyboard shortcut: ${e}`);
+      }
+    }
+  },
+
+  // Called when keybinding setting changes
+  on_keybinding_changed: function() {
+    // Remove old keybinding
+    try {
+      Main.keybindingManager.removeHotKey(UUID + "-toggle");
+    } catch (e) {
+      // Ignore if it wasn't set
+    }
+    // Setup new keybinding
+    this.setupKeybinding();
+  },
+
+  // Get display name for a device (nickname or friendly name)
+  getDeviceName: function(deviceId, isDevice1) {
+    if (!deviceId) return "Unknown";
+
+    // Use nickname if set
+    let nickname = isDevice1 ? this.device1Nickname : this.device2Nickname;
+    if (nickname && nickname.trim() !== "") {
+      return nickname.trim();
+    }
+
+    // Otherwise use friendly name from sinks
+    let sinks = getAvailableSinks();
+    return sinks[deviceId] || deviceId.split('.').pop();
+  },
+
+  // Play test sound on current device
+  playTestSound: function() {
+    try {
+      // Use paplay to play a simple beep
+      GLib.spawn_command_line_async("paplay /usr/share/sounds/freedesktop/stereo/audio-volume-change.oga");
+      if (this.showNotifications) {
+        Main.notify("Audio Toggle", "Playing test sound on current device");
+      }
+    } catch (e) {
+      global.logError(`[Audio Toggle] Failed to play test sound: ${e}`);
+      Main.notify("Audio Toggle", "Could not play test sound. Make sure 'paplay' is installed.");
+    }
+  },
+
+  // Build the right-click popup menu
+  buildMenu: function() {
+    this.menu.removeAll();
+
+    let sinks = getAvailableSinks();
+    let current = getDefaultSink();
+
+    // Add all available devices
+    for (let [sinkId, sinkName] of Object.entries(sinks)) {
+      let itemLabel = sinkName;
+      if (sinkId === current) {
+        itemLabel = "✓ " + itemLabel;
+      }
+
+      let menuItem = new PopupMenu.PopupMenuItem(itemLabel);
+      menuItem.connect('activate', () => {
+        this.switchToDevice(sinkId);
+      });
+      this.menu.addMenuItem(menuItem);
+    }
+
+    // Add separator
+    this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+
+    // Add "Configure" option
+    let configItem = new PopupMenu.PopupMenuItem("⚙ Configure");
+    configItem.connect('activate', () => {
+      GLib.spawn_command_line_async("cinnamon-settings applets");
+    });
+    this.menu.addMenuItem(configItem);
+  },
+
+  // Visual feedback animation
+  animateIcon: function() {
+    try {
+      let icon = this.actor.get_children()[0];
+      if (icon) {
+        // Pulse animation
+        Tweener.addTween(icon, {
+          scale_x: 1.2,
+          scale_y: 1.2,
+          time: 0.1,
+          transition: 'easeOutQuad',
+          onComplete: () => {
+            Tweener.addTween(icon, {
+              scale_x: 1.0,
+              scale_y: 1.0,
+              time: 0.1,
+              transition: 'easeInQuad'
+            });
+          }
+        });
+      }
+    } catch (e) {
+      global.logError(`[Audio Toggle] Animation error: ${e}`);
+    }
+  },
+
+  // Toggle between configured devices (for keyboard shortcut)
+  toggleDevices: function() {
+    this.on_applet_clicked(null);
   },
 
   // Build and apply combobox options for device1 and device2 from available sinks
@@ -359,6 +520,8 @@ MyApplet.prototype = {
     this.migrateSettingsValues();
     // Keep combobox options up to date whenever settings change
     this.populateDeviceOptions();
+    // Rebuild menu in case device list changed
+    this.buildMenu();
     this.updateDisplay();
   },
 
@@ -398,7 +561,7 @@ MyApplet.prototype = {
 
     // When both configured devices resolve to the same sink, honor a visual-only toggle using _visualToggleState
     if (dev1 && dev2 && dev1 === dev2) {
-      let deviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
+      let deviceName = this.getDeviceName(dev1, true);
       let iconName = this._visualToggleState ? (this.device2Icon || 'audio-headphones-symbolic') : (this.device1Icon || 'video-display-symbolic');
       this.set_applet_icon_symbolic_name(iconName);
       this.set_applet_tooltip(
@@ -406,6 +569,7 @@ MyApplet.prototype = {
         `Device: ${deviceName}\n` +
         `ID: ${dev1}\n\n` +
         `Click: Switch icon\n` +
+        `Right-click: Device menu\n` +
         `Middle-click: Settings\n` +
         `Scroll: No effect (same device)`
       );
@@ -416,13 +580,14 @@ MyApplet.prototype = {
       } else {
         this.set_applet_icon_symbolic_name('video-display-symbolic');
       }
-      let deviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
-      let otherDeviceName = sinks[dev2] || (dev2 ? dev2.split('.').pop() : 'Unknown');
+      let deviceName = this.getDeviceName(dev1, true);
+      let otherDeviceName = this.getDeviceName(dev2, false);
       this.set_applet_tooltip(
         `Audio Toggle\n\n` +
         `Current: ${deviceName}\n` +
         `Switch to: ${otherDeviceName}\n\n` +
         `Click/Scroll: Switch devices\n` +
+        `Right-click: Device menu\n` +
         `Middle-click: Settings`
       );
     } else if (current === dev2) {
@@ -431,32 +596,40 @@ MyApplet.prototype = {
       } else {
         this.set_applet_icon_symbolic_name('audio-headphones-symbolic');
       }
-      let deviceName = sinks[dev2] || (dev2 ? dev2.split('.').pop() : 'Unknown');
-      let otherDeviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
+      let deviceName = this.getDeviceName(dev2, false);
+      let otherDeviceName = this.getDeviceName(dev1, true);
       this.set_applet_tooltip(
         `Audio Toggle\n\n` +
         `Current: ${deviceName}\n` +
         `Switch to: ${otherDeviceName}\n\n` +
         `Click/Scroll: Switch devices\n` +
+        `Right-click: Device menu\n` +
         `Middle-click: Settings`
       );
     } else {
       this.set_applet_icon_symbolic_name('audio-card-symbolic');
-      let dev1Name = sinks[dev1] || 'Unknown';
-      let dev2Name = sinks[dev2] || 'Unknown';
+      let dev1Name = this.getDeviceName(dev1, true);
+      let dev2Name = this.getDeviceName(dev2, false);
       this.set_applet_tooltip(
         `Audio Toggle - Unknown Device Active\n\n` +
         `Current device is neither:\n` +
         `• ${dev1Name}\n` +
         `• ${dev2Name}\n\n` +
-        `Click to switch to ${dev1Name}`
+        `Click to switch to ${dev1Name}\n` +
+        `Right-click: Device menu`
       );
     }
   },
 
   switchToDevice: function(target) {
     let sinks = getAvailableSinks();
-    let targetName = sinks[target] || target.split('.').pop();
+
+    // Get display name using nickname if available
+    let isDevice1 = (target === resolveSink(this.device1));
+    let targetName = this.getDeviceName(target, isDevice1);
+    if (!targetName || targetName === "Unknown") {
+      targetName = sinks[target] || target.split('.').pop();
+    }
 
     // Validate that target device exists
     if (!sinks[target]) {
@@ -471,6 +644,18 @@ MyApplet.prototype = {
       );
       global.logError(`[Audio Toggle] Device not found: ${target}`);
       return false;
+    }
+
+    // Save current device's volume if volume memory is enabled
+    if (this.rememberVolume) {
+      let currentDevice = getDefaultSink();
+      if (currentDevice) {
+        let currentVolume = getSinkVolume(currentDevice);
+        if (currentVolume !== null) {
+          this._volumeMemory[currentDevice] = currentVolume;
+          global.log(`[Audio Toggle] Saved volume ${currentVolume}% for ${currentDevice}`);
+        }
+      }
     }
 
     // Try to switch device
@@ -489,10 +674,21 @@ MyApplet.prototype = {
       return false;
     }
 
-    // Success - move audio streams and update display
+    // Success - animate icon
+    this.animateIcon();
+
+    // Move audio streams, restore volume, and update display
     global.log(`[Audio Toggle] Successfully switched to ${target}`);
     GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
       moveAllInputsTo(target);
+
+      // Restore volume if we have it saved
+      if (this.rememberVolume && this._volumeMemory.hasOwnProperty(target)) {
+        let savedVolume = this._volumeMemory[target];
+        setSinkVolume(target, savedVolume);
+        global.log(`[Audio Toggle] Restored volume ${savedVolume}% for ${target}`);
+      }
+
       this.updateDisplay();
       if (this.showNotifications) {
         Main.notify("Audio Toggle", `Switched to ${targetName}`);
@@ -544,8 +740,8 @@ MyApplet.prototype = {
     // Open settings on middle-click
     global.log("[Audio Toggle] Middle-click: opening settings");
     try {
-      // Use cinnamon-settings to open the applet settings
-      GLib.spawn_command_line_async(`cinnamon-settings applets toggle-audio@zonaston`);
+      // Open general applets settings page
+      GLib.spawn_command_line_async("cinnamon-settings applets");
     } catch (e) {
       global.logError(`[Audio Toggle] Failed to open settings: ${e}`);
       Main.notify("Audio Toggle", "Could not open settings. Try right-click > Configure");
@@ -569,6 +765,12 @@ MyApplet.prototype = {
 
     global.log(`[Audio Toggle] Scroll event: switching to ${target}`);
     this.switchToDevice(target);
+  },
+
+  on_applet_right_clicked: function(event) {
+    // Build and show the popup menu
+    this.buildMenu();
+    this.menu.toggle();
   }
 };
 
