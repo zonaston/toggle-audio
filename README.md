@@ -6,7 +6,6 @@ Features
 - Toggle between any two configured audio sinks (moves existing audio streams to the new default sink)
 - **Multiple interaction modes:**
   - Click to switch devices
-  - Scroll up/down to switch devices
   - Middle-click for quick settings access
 - **Smart device detection:** Auto-detects common device combinations on first run
 - **Dynamic device lists:** Settings comboboxes populated from your system's current sinks
@@ -46,8 +45,7 @@ Enable
 Usage
 - **Left-click:** Switch between configured devices
 - **Middle-click:** Open settings (quick access)
-- **Scroll wheel:** Switch between devices (scroll up or down)
-- **Right-click:** Access applet menu
+- **Right-click:** Access device menu and configuration
 
 Troubleshooting
 **Device not appearing in list?**
