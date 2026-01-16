@@ -12,12 +12,26 @@
     "options": { }
   },
 
+  "device1-nickname": {
+    "type": "entry",
+    "default": "",
+    "description": "Nickname for Device 1 (optional)",
+    "tooltip": "Custom friendly name like 'Speakers' or 'Monitor'. Leave empty to use device name."
+  },
+
   "device2": {
     "type": "combobox",
     "default": "",
     "description": "Second audio device",
     "tooltip": "Pick a device from your system (list is populated dynamically)",
     "options": { }
+  },
+
+  "device2-nickname": {
+    "type": "entry",
+    "default": "",
+    "description": "Nickname for Device 2 (optional)",
+    "tooltip": "Custom friendly name like 'Headset' or 'USB Speakers'. Leave empty to use device name."
   },
 
   "refresh-devices-sep": {
@@ -30,16 +44,37 @@
     "callback": "refreshDevices"
   },
 
+  "test-sound-button": {
+    "type": "button",
+    "description": "Play test sound",
+    "callback": "playTestSound",
+    "tooltip": "Play a test sound to verify the current audio device"
+  },
+
   "behavior-header": {
     "type": "header",
     "description": "Behavior"
   },
 
+  "toggle-keybinding": {
+    "type": "keybinding",
+    "default": "",
+    "description": "Keyboard shortcut to toggle devices",
+    "tooltip": "Set a global keyboard shortcut to switch audio devices. Leave empty to disable."
+  },
+
   "show-notifications": {
     "type": "checkbox",
-    "default": true,
+    "default": false,
     "description": "Show notifications when switching devices",
     "tooltip": "Display a notification popup when audio device is changed"
+  },
+
+  "remember-volume": {
+    "type": "checkbox",
+    "default": true,
+    "description": "Remember volume levels per device",
+    "tooltip": "Automatically restore volume when switching to a device"
   },
 
   "appearance-header": {
