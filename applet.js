@@ -3,24 +3,50 @@ const Main = imports.ui.main;
 const GLib = imports.gi.GLib;
 const ByteArray = imports.byteArray;
 const Settings = imports.ui.settings;
-// const Gio = imports.gi.Gio; // no longer used
+const Gio = imports.gi.Gio;
 
 const PACTL = "/usr/bin/pactl";
 
+// Check if pactl exists at startup
+function checkPactlExists() {
+  let pactlFile = Gio.File.new_for_path(PACTL);
+  if (!pactlFile.query_exists(null)) {
+    // Try alternative paths
+    let altPaths = ["/bin/pactl", "/usr/local/bin/pactl"];
+    for (let path of altPaths) {
+      let altFile = Gio.File.new_for_path(path);
+      if (altFile.query_exists(null)) {
+        global.log(`[Audio Toggle] Found pactl at alternate path: ${path}`);
+        return path;
+      }
+    }
+    global.logError(`[Audio Toggle] ERROR: pactl not found at ${PACTL} or alternate paths`);
+    return null;
+  }
+  return PACTL;
+}
+
 function runSync(cmd) {
   try {
+    global.log(`[Audio Toggle] Running: ${cmd}`);
     let [ok, out, err, status] = GLib.spawn_command_line_sync(cmd);
-    return { ok, status, out: ByteArray.toString(out || []), err: ByteArray.toString(err || []) };
+    let result = { ok, status, out: ByteArray.toString(out || []), err: ByteArray.toString(err || []) };
+    if (!ok || status !== 0) {
+      global.logError(`[Audio Toggle] Command failed: ${cmd}\nStatus: ${status}\nError: ${result.err}`);
+    }
+    return result;
   } catch (e) {
+    global.logError(`[Audio Toggle] Exception running command: ${cmd}\n${e}`);
     return { ok: false, status: -1, out: "", err: String(e) };
   }
 }
 
 function runAsync(cmd) {
   try {
+    global.log(`[Audio Toggle] Running async: ${cmd}`);
     GLib.spawn_command_line_async(cmd);
   } catch (e) {
-    // Silent fail
+    global.logError(`[Audio Toggle] Failed to run async command: ${cmd}\n${e}`);
   }
 }
 
@@ -47,19 +73,52 @@ function moveAllInputsTo(sink) {
 
 function getAvailableSinks() {
   let r = runSync(`${PACTL} list short sinks`);
-  if (!r.ok) return {};
-  
+  if (!r.ok) {
+    global.logError("[Audio Toggle] Failed to get sink list");
+    return {};
+  }
+
   let sinks = {};
   r.out.split('\n').forEach(line => {
     line = line.trim();
     if (!line) return;
-    
+
     let parts = line.split(/\s+/);
     if (parts.length >= 2) {
       let sinkName = parts[1];
+      sinks[sinkName] = sinkName; // Store temporarily, will get descriptions below
+    }
+  });
+
+  // Get detailed sink info for better display names
+  let detailsResult = runSync(`${PACTL} list sinks`);
+  if (detailsResult.ok) {
+    let currentSink = null;
+    let currentDesc = null;
+
+    detailsResult.out.split('\n').forEach(line => {
+      // Look for "Name: sink_name"
+      let nameMatch = line.match(/^\s*Name:\s*(.+)$/);
+      if (nameMatch) {
+        currentSink = nameMatch[1].trim();
+        currentDesc = null;
+      }
+
+      // Look for "Description: Friendly Name"
+      let descMatch = line.match(/^\s*Description:\s*(.+)$/);
+      if (descMatch && currentSink && sinks.hasOwnProperty(currentSink)) {
+        currentDesc = descMatch[1].trim();
+        sinks[currentSink] = currentDesc;
+      }
+    });
+  }
+
+  // Fallback to friendly name generation for any sinks without descriptions
+  for (let sinkName in sinks) {
+    if (sinks[sinkName] === sinkName) {
       let displayName = sinkName;
-      
-      // Try to make a friendlier display name for both PulseAudio and PipeWire
+
+      // Try to make a friendlier display name
       if (sinkName.includes('hdmi')) {
         displayName = "HDMI Output";
       } else if (sinkName.includes('usb')) {
@@ -71,17 +130,18 @@ function getAvailableSinks() {
       } else if (sinkName.includes('pipewire')) {
         displayName = "PipeWire Device";
       } else {
-        // Extract device name from sink name (works for both ALSA and PipeWire)
+        // Extract device name from sink name
         let match = sinkName.match(/(?:alsa_output|pipewire)\.(.+?)(?:\.|$)/);
         if (match) {
           displayName = match[1].replace(/[_-]/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
         }
       }
-      
+
       sinks[sinkName] = displayName;
     }
-  });
-  
+  }
+
+  global.log(`[Audio Toggle] Found ${Object.keys(sinks).length} sinks`);
   return sinks;
 }
 
@@ -107,7 +167,18 @@ MyApplet.prototype = {
 
   _init: function(orientation, panel_height, instance_id) {
     Applet.IconApplet.prototype._init.call(this, orientation, panel_height, instance_id);
-    
+
+    global.log("[Audio Toggle] Initializing applet");
+
+    // Check if pactl is available
+    this.pactlPath = checkPactlExists();
+    if (!this.pactlPath) {
+      this.set_applet_icon_symbolic_name('dialog-error-symbolic');
+      this.set_applet_tooltip('Audio Toggle: pactl not found. Please install pulseaudio-utils or pipewire-pulse');
+      Main.notifyError("Audio Toggle Error", "pactl command not found.\n\nPlease install:\n• Debian/Ubuntu: pulseaudio-utils or pipewire-pulse\n• Fedora: pulseaudio-utils or pipewire-utils\n• Arch: pulseaudio or pipewire-pulse");
+      return;
+    }
+
     // Initialize settings
     this.settings = new Settings.AppletSettings(this, "toggle-audio@zonaston", instance_id);
     // Use BIDIRECTIONAL so changes we make programmatically reflect in the UI immediately
@@ -120,6 +191,9 @@ MyApplet.prototype = {
     // Visual toggle state used when both devices are the same (icon-only toggle)
     this._visualToggleState = false;
 
+    // Track if this is first run (no devices configured)
+    this._isFirstRun = (!this.device1 && !this.device2);
+
     // Attempt to migrate any legacy values (e.g. human labels instead of sink IDs)
     this.migrateSettingsValues();
 
@@ -130,12 +204,32 @@ MyApplet.prototype = {
     this.populateDeviceOptions();
 
     this.updateDisplay();
+
+    // Show first-run help if needed
+    if (this._isFirstRun && (!this.device1 || !this.device2)) {
+      this.showFirstRunHelp();
+    }
+
+    global.log("[Audio Toggle] Initialization complete");
+  },
+
+  showFirstRunHelp: function() {
+    Main.notify(
+      "Audio Toggle - Setup Required",
+      "Welcome! To use this applet:\n\n" +
+      "1. Right-click the applet icon\n" +
+      "2. Select 'Configure...'\n" +
+      "3. Choose your two audio devices\n" +
+      "4. Click to switch between them!\n\n" +
+      "Tip: Middle-click opens settings"
+    );
   },
 
   // Build and apply combobox options for device1 and device2 from available sinks
   populateDeviceOptions: function() {
     try {
       let sinks = getAvailableSinks();
+      let current = getDefaultSink();
       let options = { "Unset": "" };
 
       // Ensure unique and informative display labels
@@ -143,24 +237,32 @@ MyApplet.prototype = {
         let label = name || id;
         // Add a short suffix of the id to disambiguate duplicates
         let shortId = id.length > 24 ? id.slice(-24) : id;
-        label = `${label} — ${shortId}`;
+
+        // Add status badge
+        let badge = "";
+        if (id === current) {
+          badge = " (Active)";
+        }
+
+        label = `${label}${badge} — ${shortId}`;
         options[label] = id;
       }
 
       // Preserve current selections even if temporarily unavailable
       if (this.device1 && !Object.values(options).includes(this.device1)) {
-        options[`(Unavailable) ${this.device1}`] = this.device1;
+        options[`⚠ Disconnected: ${this.device1}`] = this.device1;
       }
       if (this.device2 && !Object.values(options).includes(this.device2)) {
-        options[`(Unavailable) ${this.device2}`] = this.device2;
+        options[`⚠ Disconnected: ${this.device2}`] = this.device2;
       }
 
       if (typeof this.settings.setOptions === 'function') {
         this.settings.setOptions("device1", options);
         this.settings.setOptions("device2", options);
+        global.log("[Audio Toggle] Device options populated successfully");
       }
     } catch (e) {
-      // best-effort; ignore errors if settings UI isn't open or setOptions unavailable
+      global.logError(`[Audio Toggle] Error populating device options: ${e}`);
     }
   },
 
@@ -176,35 +278,45 @@ MyApplet.prototype = {
   autoDetectDevices: function() {
     // Only auto-detect if both devices are empty (startup behavior)
     if (!this.device1 && !this.device2) {
+      global.log("[Audio Toggle] Auto-detecting devices...");
       let sinks = getAvailableSinks();
       let sinkNames = Object.keys(sinks);
-      
+
       if (sinkNames.length >= 2) {
         // Try to intelligently pick devices
         let hdmiDevice = sinkNames.find(s => s.includes('hdmi'));
         let usbDevice = sinkNames.find(s => s.includes('usb'));
         let analogDevice = sinkNames.find(s => s.includes('analog'));
-        
+
         if (hdmiDevice && usbDevice) {
           // HDMI and USB headset - common setup
           this.settings.setValue("device1", hdmiDevice);
           this.settings.setValue("device2", usbDevice);
+          global.log(`[Audio Toggle] Auto-detected: HDMI (${hdmiDevice}) and USB (${usbDevice})`);
         } else if (hdmiDevice && analogDevice) {
           // HDMI and analog - another common setup
           this.settings.setValue("device1", hdmiDevice);
           this.settings.setValue("device2", analogDevice);
+          global.log(`[Audio Toggle] Auto-detected: HDMI (${hdmiDevice}) and Analog (${analogDevice})`);
         } else {
           // Just pick the first two
           this.settings.setValue("device1", sinkNames[0]);
           this.settings.setValue("device2", sinkNames[1]);
+          global.log(`[Audio Toggle] Auto-detected: ${sinkNames[0]} and ${sinkNames[1]}`);
         }
-        
+
         // Show notification about auto-detection
-        if (this.showNotifications) {
-          Main.notify("Audio Toggle", "Auto-detected audio devices. Check settings to customize.");
-        }
+        Main.notify(
+          "Audio Toggle - Auto-configured",
+          `Detected ${sinks[this.device1]} and ${sinks[this.device2]}.\n\n` +
+          "Right-click > Configure to customize.\n" +
+          "Middle-click for quick settings access."
+        );
       } else if (sinkNames.length === 1) {
         this.settings.setValue("device1", sinkNames[0]);
+        global.log(`[Audio Toggle] Only one device found: ${sinkNames[0]}`);
+      } else {
+        global.logError("[Audio Toggle] No audio devices found!");
       }
     }
   },
@@ -223,19 +335,22 @@ MyApplet.prototype = {
       let changed = false;
 
       if (this.device1 && !keys.includes(this.device1) && reverse[this.device1]) {
+        global.log(`[Audio Toggle] Migrating device1 from "${this.device1}" to "${reverse[this.device1]}"`);
         this.settings.setValue("device1", reverse[this.device1]);
         changed = true;
       }
       if (this.device2 && !keys.includes(this.device2) && reverse[this.device2]) {
+        global.log(`[Audio Toggle] Migrating device2 from "${this.device2}" to "${reverse[this.device2]}"`);
         this.settings.setValue("device2", reverse[this.device2]);
         changed = true;
       }
 
-      if (changed && this.showNotifications) {
-        Main.notify("Audio Toggle", "Updated device settings to match current system sink IDs.");
+      if (changed) {
+        Main.notify("Audio Toggle - Settings Updated", "Device settings migrated to current system configuration.");
+        global.log("[Audio Toggle] Migration complete");
       }
     } catch (e) {
-      // ignore
+      global.logError(`[Audio Toggle] Error during settings migration: ${e}`);
     }
   },
 
@@ -250,21 +365,50 @@ MyApplet.prototype = {
   updateDisplay: function() {
     if (!this.device1 || !this.device2) {
       this.set_applet_icon_symbolic_name('audio-card-symbolic');
-      this.set_applet_tooltip('Audio Toggle: Please configure devices in settings');
+      this.set_applet_tooltip(
+        'Audio Toggle - Setup Required\n\n' +
+        'Right-click > Configure to set up devices\n' +
+        'Middle-click for quick settings access'
+      );
       return;
     }
-    
+
     let current = getDefaultSink();
     let sinks = getAvailableSinks();
     let dev1 = resolveSink(this.device1);
     let dev2 = resolveSink(this.device2);
-    
+
+    // Check if devices are available
+    let dev1Available = dev1 && sinks[dev1];
+    let dev2Available = dev2 && sinks[dev2];
+
+    if (!dev1Available || !dev2Available) {
+      this.set_applet_icon_symbolic_name('dialog-warning-symbolic');
+      let missingDevices = [];
+      if (!dev1Available) missingDevices.push(this.device1);
+      if (!dev2Available) missingDevices.push(this.device2);
+      this.set_applet_tooltip(
+        'Audio Toggle - Device Unavailable\n\n' +
+        `Missing: ${missingDevices.join(', ')}\n\n` +
+        'Right-click > Configure > Refresh device list\n' +
+        'Or select different devices'
+      );
+      return;
+    }
+
     // When both configured devices resolve to the same sink, honor a visual-only toggle using _visualToggleState
     if (dev1 && dev2 && dev1 === dev2) {
       let deviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
       let iconName = this._visualToggleState ? (this.device2Icon || 'audio-headphones-symbolic') : (this.device1Icon || 'video-display-symbolic');
       this.set_applet_icon_symbolic_name(iconName);
-      this.set_applet_tooltip(`Audio: ${deviceName} (visual toggle) - click to switch icon`);
+      this.set_applet_tooltip(
+        `Audio Toggle - Visual Mode\n\n` +
+        `Device: ${deviceName}\n` +
+        `ID: ${dev1}\n\n` +
+        `Click: Switch icon\n` +
+        `Middle-click: Settings\n` +
+        `Scroll: No effect (same device)`
+      );
     } else if (current === dev1) {
       // Prefer user-selected icon, fallback to the previous default
       if (this.device1Icon) {
@@ -273,7 +417,14 @@ MyApplet.prototype = {
         this.set_applet_icon_symbolic_name('video-display-symbolic');
       }
       let deviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
-      this.set_applet_tooltip(`Audio: ${deviceName} (click to switch)`);
+      let otherDeviceName = sinks[dev2] || (dev2 ? dev2.split('.').pop() : 'Unknown');
+      this.set_applet_tooltip(
+        `Audio Toggle\n\n` +
+        `Current: ${deviceName}\n` +
+        `Switch to: ${otherDeviceName}\n\n` +
+        `Click/Scroll: Switch devices\n` +
+        `Middle-click: Settings`
+      );
     } else if (current === dev2) {
       if (this.device2Icon) {
         this.set_applet_icon_symbolic_name(this.device2Icon);
@@ -281,67 +432,143 @@ MyApplet.prototype = {
         this.set_applet_icon_symbolic_name('audio-headphones-symbolic');
       }
       let deviceName = sinks[dev2] || (dev2 ? dev2.split('.').pop() : 'Unknown');
-      this.set_applet_tooltip(`Audio: ${deviceName} (click to switch)`);
+      let otherDeviceName = sinks[dev1] || (dev1 ? dev1.split('.').pop() : 'Unknown');
+      this.set_applet_tooltip(
+        `Audio Toggle\n\n` +
+        `Current: ${deviceName}\n` +
+        `Switch to: ${otherDeviceName}\n\n` +
+        `Click/Scroll: Switch devices\n` +
+        `Middle-click: Settings`
+      );
     } else {
       this.set_applet_icon_symbolic_name('audio-card-symbolic');
-      this.set_applet_tooltip('Audio: Unknown device (click to switch)');
+      let dev1Name = sinks[dev1] || 'Unknown';
+      let dev2Name = sinks[dev2] || 'Unknown';
+      this.set_applet_tooltip(
+        `Audio Toggle - Unknown Device Active\n\n` +
+        `Current device is neither:\n` +
+        `• ${dev1Name}\n` +
+        `• ${dev2Name}\n\n` +
+        `Click to switch to ${dev1Name}`
+      );
     }
   },
 
-  on_applet_clicked: function() {
+  switchToDevice: function(target) {
+    let sinks = getAvailableSinks();
+    let targetName = sinks[target] || target.split('.').pop();
+
+    // Validate that target device exists
+    if (!sinks[target]) {
+      Main.notifyError(
+        "Audio Toggle - Device Not Found",
+        `${targetName} is not available.\n\n` +
+        `This may be because:\n` +
+        `• Device is unplugged\n` +
+        `• Device is turned off\n` +
+        `• Audio service restarted\n\n` +
+        `Right-click > Configure > Refresh device list`
+      );
+      global.logError(`[Audio Toggle] Device not found: ${target}`);
+      return false;
+    }
+
+    // Try to switch device
+    global.log(`[Audio Toggle] Switching to device: ${target}`);
+    let result = runSync(`${PACTL} set-default-sink ${target}`);
+    if (result.status !== 0) {
+      Main.notifyError(
+        "Audio Toggle - Switch Failed",
+        `Could not switch to ${targetName}\n\n` +
+        `Error: ${result.err || 'Unknown error'}\n\n` +
+        `Try:\n` +
+        `• Refresh device list\n` +
+        `• Check device is enabled\n` +
+        `• Restart audio service`
+      );
+      return false;
+    }
+
+    // Success - move audio streams and update display
+    global.log(`[Audio Toggle] Successfully switched to ${target}`);
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+      moveAllInputsTo(target);
+      this.updateDisplay();
+      if (this.showNotifications) {
+        Main.notify("Audio Toggle", `Switched to ${targetName}`);
+      }
+      return GLib.SOURCE_REMOVE;
+    });
+    return true;
+  },
+
+  on_applet_clicked: function(event) {
     if (!this.device1 || !this.device2) {
-      Main.notify("Audio Toggle", "Please configure audio devices in applet settings");
+      Main.notify(
+        "Audio Toggle - Setup Required",
+        "Please configure devices:\n\n" +
+        "1. Right-click this applet\n" +
+        "2. Select 'Configure...'\n" +
+        "3. Choose two audio devices"
+      );
       return;
     }
-    
+
     let current = getDefaultSink();
     let dev1 = resolveSink(this.device1);
     let dev2 = resolveSink(this.device2);
 
     if (!dev1 || !dev2) {
-      if (this.showNotifications) {
-        Main.notify("Audio Toggle", "Please configure two audio devices in settings.");
-      }
+      Main.notify(
+        "Audio Toggle - Configuration Error",
+        "Could not resolve configured devices.\n\n" +
+        "Right-click > Configure to fix settings"
+      );
+      global.logError(`[Audio Toggle] Failed to resolve devices: dev1=${this.device1}, dev2=${this.device2}`);
       return;
     }
 
     if (dev1 === dev2) {
       // Same device configured in both slots: visual toggle only
       this._visualToggleState = !this._visualToggleState;
+      global.log(`[Audio Toggle] Visual toggle: ${this._visualToggleState}`);
       this.updateDisplay();
       return;
     }
 
     let target = (current === dev1) ? dev2 : dev1;
-    let sinks = getAvailableSinks();
-    let targetName = sinks[target] || target.split('.').pop();
-    
-    // Validate that target device exists
-    if (!sinks[target]) {
-      if (this.showNotifications) {
-        Main.notify("Audio Toggle", `Device ${targetName} not found. Please refresh device list in settings.`);
-      }
+    this.switchToDevice(target);
+  },
+
+  on_applet_middle_clicked: function(event) {
+    // Open settings on middle-click
+    global.log("[Audio Toggle] Middle-click: opening settings");
+    try {
+      // Use cinnamon-settings to open the applet settings
+      GLib.spawn_command_line_async(`cinnamon-settings applets toggle-audio@zonaston`);
+    } catch (e) {
+      global.logError(`[Audio Toggle] Failed to open settings: ${e}`);
+      Main.notify("Audio Toggle", "Could not open settings. Try right-click > Configure");
+    }
+  },
+
+  on_applet_scroll: function(event) {
+    if (!this.device1 || !this.device2) {
       return;
     }
-    
-    // Try to switch device
-    let result = runSync(`${PACTL} set-default-sink ${target}`);
-    if (result.status !== 0) {
-      if (this.showNotifications) {
-        Main.notify("Audio Toggle", `Failed to switch to ${targetName}: ${result.err || 'Unknown error'}`);
-      }
-      return;
+
+    let dev1 = resolveSink(this.device1);
+    let dev2 = resolveSink(this.device2);
+
+    if (!dev1 || !dev2 || dev1 === dev2) {
+      return; // Don't scroll if devices not configured or same device
     }
-    
-    // Success - move audio streams and update display
-    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-      moveAllInputsTo(target);
-      this.updateDisplay();
-      if (this.showNotifications) {
-        Main.notify("Audio Output", `Switched to ${targetName}`);
-      }
-      return GLib.SOURCE_REMOVE;
-    });
+
+    let current = getDefaultSink();
+    let target = (current === dev1) ? dev2 : dev1;
+
+    global.log(`[Audio Toggle] Scroll event: switching to ${target}`);
+    this.switchToDevice(target);
   }
 };
 
